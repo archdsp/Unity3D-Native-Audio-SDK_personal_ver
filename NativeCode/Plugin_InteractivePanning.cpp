@@ -262,7 +262,7 @@ namespace InteractivePanning
             for (int c = 0; c < 2; c++)
             {
                 // stereopan is in the [-1; 1] range, this acts the way fmod does it for stereo
-                float stereopan = ((c == 0) ? cosf((azimuth_rad / 2.0f) - (kPI / 4.0f)) : -sinf((azimuth_rad / 2.0f) - (kPI / 4.0f)));
+                float interactivePan = ((c == 0) ? cosf((azimuth_rad / 2.0f) - (kPI / 4.0f)) : -sinf((azimuth_rad / 2.0f) - (kPI / 4.0f)));
 
                 InstanceChannel& ch = data->ch[c];
 
@@ -293,7 +293,7 @@ namespace InteractivePanning
                 // 출력 버퍼, 반향 버퍼 쓰기
                 for (int n = 0; n < HRTFLEN; n++)
                 {
-                    float s = inbuffer[n * 2 + c] * stereopan;
+                    float s = inbuffer[n * 2 + c] * fabsf(interactivePan);
                     float y = s + (ch.y[n].re * GAINCORRECTION - s) * spatialblend;
                     outbuffer[n * 2 + c] = y;
                     reverb[n * 2 + c] += y * reverbmix;
