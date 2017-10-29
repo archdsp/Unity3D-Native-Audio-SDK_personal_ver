@@ -191,7 +191,7 @@ namespace Spatializer
 
     UNITY_AUDIODSP_RESULT UNITY_AUDIODSP_CALLBACK ProcessCallback(UnityAudioEffectState* state, float* inbuffer, float* outbuffer, unsigned int length, int inchannels, int outchannels)
     {
-        // Check that I/O formats are right and that the host API supports this feature
+        // API 버전, NULL 처리, 채널 갯수 처리
         if (inchannels != 2 || outchannels != 2 ||
             !IsHostCompatible(state) || state->spatializerdata == NULL)
         {
@@ -203,55 +203,57 @@ namespace Spatializer
 
         static const float kRad2Deg = 180.0f / kPI;
 
-        float* m = state->spatializerdata->listenermatrix;
-        float* s = state->spatializerdata->sourcematrix;
+        // 음원, 청자 위치(동차좌표)
+        float* listenerMat = state->spatializerdata->listenermatrix;
+        float* sourceMat = state->spatializerdata->sourcematrix;
 
         // Currently we ignore source orientation and only use the position
-        float px = s[12];
-        float py = s[13];
-        float pz = s[14];
+        float px = sourceMat[12];
+        float py = sourceMat[13];
+        float pz = sourceMat[14];
 
-        float dir_x = m[0] * px + m[4] * py + m[8] * pz + m[12];
-        float dir_y = m[1] * px + m[5] * py + m[9] * pz + m[13];
-        float dir_z = m[2] * px + m[6] * py + m[10] * pz + m[14];
+        // 방향 벡터
+        float dir_x = listenerMat[0] * px + listenerMat[4] * py + listenerMat[8] * pz + listenerMat[12];
+        float dir_y = listenerMat[1] * px + listenerMat[5] * py + listenerMat[9] * pz + listenerMat[13];
+        float dir_z = listenerMat[2] * px + listenerMat[6] * py + listenerMat[10] * pz + listenerMat[14];
 
-        float azimuth = (fabsf(dir_z) < 0.001f) ? 0.0f : atan2f(dir_x, dir_z);
-        if (azimuth < 0.0f)
-            azimuth += 2.0f * kPI;
-        azimuth = FastClip(azimuth * kRad2Deg, 0.0f, 360.0f);
+        // 방위 및 고도 계산
+        float azimuth_rad = (fabsf(dir_z) < 0.001f) ? 0.0f : atan2f(dir_x, dir_z);
+        if (azimuth_rad < 0.0f)
+            azimuth_rad += 2.0f * kPI;
+
+        float azimuth_deg = FastClip(azimuth_rad * kRad2Deg, 0.0f, 360.0f);
 
         float elevation = atan2f(dir_y, sqrtf(dir_x * dir_x + dir_z * dir_z) + 0.001f) * kRad2Deg;
+
+        // 2D 또는 3D 공간 혼합 여부
         float spatialblend = state->spatializerdata->spatialblend;
+
+        // 반향
         float reverbmix = state->spatializerdata->reverbzonemix;
 
-        // HRTF 함수값을 받아옴
-        GetHRTF(0, data->ch[0].h, azimuth, elevation);
-        GetHRTF(1, data->ch[1].h, azimuth, elevation);
+        GetHRTF(0, data->ch[0].h, azimuth_deg, elevation);
+        GetHRTF(1, data->ch[1].h, azimuth_deg, elevation);
 
-        // From the FMOD documentation:
-        //   A spread angle of 0 makes the stereo sound mono at the point of the 3D emitter.
-        //   A spread angle of 90 makes the left part of the stereo sound place itself at 45 degrees to the left and the right part 45 degrees to the right.
-        //   A spread angle of 180 makes the left part of the stero sound place itself at 90 degrees to the left and the right part 90 degrees to the right.
-        //   A spread angle of 360 makes the stereo sound mono at the opposite speaker location to where the 3D emitter should be located (by moving the left part 180 degrees left and the right part 180 degrees right). So in this case, behind you when the sound should be in front of you!
-        // Note that FMOD performs the spreading and panning in one go. We can't do this here due to the way that impulse-based spatialization works, so we perform the spread calculations on the left/right source signals before they enter the convolution processing.
-        // That way we can still use it to control how the source signal downmixing takes place.
+        // 반향 버퍼
+        float* reverb = reverbmixbuffer;
+
         float spread = cosf(state->spatializerdata->spread * kPI / 360.0f);
         float spreadmatrix[2] = { 2.0f - spread, spread };
 
-        float* reverb = reverbmixbuffer;
         for (int sampleOffset = 0; sampleOffset < length; sampleOffset += HRTFLEN)
         {
             for (int c = 0; c < 2; c++)
             {
                 // stereopan is in the [-1; 1] range, this acts the way fmod does it for stereo
-                float stereopan = 1.0f - ((c == 0) ? FastMax(0.0f, state->spatializerdata->stereopan) : FastMax(0.0f, -state->spatializerdata->stereopan));
+                float stereopan = ((c == 0) ? cosf((azimuth_rad / 2.0f) - (kPI / 4.0f)) : -sinf((azimuth_rad / 2.0f) - (kPI / 4.0f)));
 
                 InstanceChannel& ch = data->ch[c];
 
                 // loudspeaker , headphone signal
                 for (int n = 0; n < HRTFLEN; n++)
                 {
-                    float left  = inbuffer[n * 2];
+                    float left = inbuffer[n * 2];
                     float right = inbuffer[n * 2 + 1];
                     ch.buffer[n] = ch.buffer[n + HRTFLEN];
                     ch.buffer[n + HRTFLEN] = left * spreadmatrix[c] + right * spreadmatrix[1 - c];
@@ -272,8 +274,7 @@ namespace Spatializer
 
                 FFT::Backward(ch.y, HRTFLEN * 2, false);
 
-                // y = (x * h) * m
-                // 패닝계수 적용, 게인 조절, 반향음 계산
+                // 출력 버퍼, 반향 버퍼 쓰기
                 for (int n = 0; n < HRTFLEN; n++)
                 {
                     float s = inbuffer[n * 2 + c] * stereopan;

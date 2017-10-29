@@ -239,6 +239,7 @@ namespace InteractivePanning
             azimuth_rad += 2.0f * kPI;
 
         float azimuth_deg = FastClip(azimuth_rad * kRad2Deg, 0.0f, 360.0f);
+
         float elevation = atan2f(dir_y, sqrtf(dir_x * dir_x + dir_z * dir_z) + 0.001f) * kRad2Deg;
 
         // 2D 또는 3D 공간 혼합 여부
@@ -246,29 +247,59 @@ namespace InteractivePanning
 
         // 반향
         float reverbmix = state->spatializerdata->reverbzonemix;
-       
+
+        GetHRTF(0, data->ch[0].h, azimuth_deg, elevation);
+        GetHRTF(1, data->ch[1].h, azimuth_deg, elevation);
+
         // 반향 버퍼
         float* reverb = reverbmixbuffer;
 
-        // 512씩 샘플씩 돌며
+        float spread = cosf(state->spatializerdata->spread * kPI / 360.0f);
+        float spreadmatrix[2] = { 2.0f - spread, spread };
+
         for (int sampleOffset = 0; sampleOffset < length; sampleOffset += HRTFLEN)
         {
-            // 스테레오 채널(L,R)
             for (int c = 0; c < 2; c++)
             {
-                // 인터렉티브 패닝 계수
-                float interactivePan = ((c == 0) ? cosf((azimuth_rad / 2.0f) - (kPI / 4.0f)) : -sinf((azimuth_rad / 2.0f) - (kPI / 4.0f)));
+                // stereopan is in the [-1; 1] range, this acts the way fmod does it for stereo
+                float stereopan = ((c == 0) ? cosf((azimuth_rad / 2.0f) - (kPI / 4.0f)) : -sinf((azimuth_rad / 2.0f) - (kPI / 4.0f)));
+
+                InstanceChannel& ch = data->ch[c];
+
+                // loudspeaker , headphone signal
+                for (int n = 0; n < HRTFLEN; n++)
+                {
+                    float left = inbuffer[n * 2];
+                    float right = inbuffer[n * 2 + 1];
+                    ch.buffer[n] = ch.buffer[n + HRTFLEN];
+                    ch.buffer[n + HRTFLEN] = left * spreadmatrix[c] + right * spreadmatrix[1 - c];
+                }
+
+                for (int n = 0; n < HRTFLEN * 2; n++)
+                {
+                    ch.x[n].re = ch.buffer[n];
+                    ch.x[n].im = 0.0f;
+                }
+
+                FFT::Forward(ch.x, HRTFLEN * 2, false);
+
+                // 출력 y = x * h * m 이므로
+                // y = x * h 
+                for (int n = 0; n < HRTFLEN * 2; n++)
+                    UnityComplexNumber::Mul<float, float, float>(ch.x[n], ch.h[n], ch.y[n]);
+
+                FFT::Backward(ch.y, HRTFLEN * 2, false);
 
                 // 출력 버퍼, 반향 버퍼 쓰기
                 for (int n = 0; n < HRTFLEN; n++)
                 {
-                    float s = inbuffer[n * 2 + c] * interactivePan;
-                    outbuffer[n * 2 + c] = s + s * spatialblend;
-                    reverb[n * 2 + c] += outbuffer[n * 2 + c] * reverbmix;
+                    float s = inbuffer[n * 2 + c] * stereopan;
+                    float y = s + (ch.y[n].re * GAINCORRECTION - s) * spatialblend;
+                    outbuffer[n * 2 + c] = y;
+                    reverb[n * 2 + c] += y * reverbmix;
                 }
             }
 
-            // 인덱스 증가
             inbuffer += HRTFLEN * 2;
             outbuffer += HRTFLEN * 2;
             reverb += HRTFLEN * 2;
